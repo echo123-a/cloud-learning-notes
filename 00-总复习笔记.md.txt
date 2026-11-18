@@ -1,0 +1,86 @@
+# 云计算实战全链路复习笔记（阶段0-阶段4）
+
+## 🌟 阶段 0：环境搭建与本地网络配置
+
+### 1. Git 环境排障
+*   **报错 `'git' 不是内部或外部命令`**：未安装 Git 或环境变量未生效。解决：下载安装 Git 后**必须重启终端**。
+*   **报错 `SSL certificate problem`**：Watt Toolkit 加速器劫持了 HTTPS 证书，Git 不认。解决：`git config --global http.sslbackend schannel`（让 Git 信任 Windows 系统证书库）。
+*   **报错 `Author identity unknown`**：未配置提交身份。解决：配置 `user.name` 和 `user.email`。
+*   **中文乱码**：`git config --global core.quotepath false`。
+*   **GitHub 加速**：使用 Watt Toolkit，登录认证走浏览器 `Sign in with your browser`。
+
+### 2. 阿里云 ECS 基础排障
+*   **无法出网（ping 不通）**：安全组未放行出方向 或 **公网带宽峰值为 0**。解决：控制台更改带宽为按使用流量，峰值 5Mbps。
+*   **外部无法访问（入网不通）**：云服务器外部有一层“虚拟防火墙”叫安全组。解决：在入方向放行指定 TCP 端口。
+
+---
+
+## 🐧 阶段 1：Linux 基础与服务排障
+
+### 1. 服务管理工具 systemctl
+*   现代 Linux 服务管理由 `systemd` 接管。
+*   `systemctl status nginx`：看状态。绿色 `active (running)` 正常；红色 `failed` 或 `inactive (dead)` 挂了。
+
+### 2. 故障排查三层逻辑（面试必考：网站挂了怎么查？）
+1.  **查服务状态**：`systemctl status 服务名`
+2.  **查端口监听**：`ss -tlnp | grep 端口号`（没输出说明没监听）
+3.  **查错误日志**：`tail -n 20 /var/log/xxx/error.log`
+
+### 3. 磁盘满了怎么查？
+*   `df -h`：看整体磁盘使用率。
+*   `du -sh /*`：看哪个目录占空间。
+*   `du -sh /var/log/*`：深入查日志文件（清理日志用 `> 文件名` 清空，别用 rm，防句柄丢失）。
+
+---
+
+## 🐳 阶段 2 & 3：Docker 容器化与云端部署
+
+### 1. Docker 安装与加速（国内环境避坑）
+*   **官方脚本失败**：`get.docker.com` 容易被阻断，改用阿里云软件源安装。
+*   **镜像加速**：修改 `/etc/docker/daemon.json`，配置公共加速器（如 `docker.1ms.run`），重启 Docker。
+
+### 2. Dockerfile 规范与分层缓存
+*   **规范**：`FROM` -> `WORKDIR` -> `COPY requirements` -> `RUN pip install` -> `COPY . .` -> `EXPOSE` -> `CMD`。
+*   **分层缓存原理（必考）**：先 COPY 依赖清单并安装，再 COPY 全量代码。这样修改代码时，不会重新执行耗时的 pip install，利用 Docker 层缓存极大提升构建速度。
+*   **端口声明**：`EXPOSE` 只是声明，真正开放端口靠 `docker run -p 宿主机端口:容器端口`。
+
+### 3. 传统部署 vs 容器化部署
+*   **传统 systemd 部署**：程序跑在宿主机，环境依赖容易冲突，无法做到“一次构建，到处运行”。
+*   **容器化部署**：打包了代码和环境，进程隔离，是目前云原生绝对的主流。
+
+---
+
+## ☸️ 阶段 4：K3s (Kubernetes) 云原生集群实战
+
+### 1. K3s 镜像拉取失败的终极解决方案（离线导入法）
+*   **现象**：Pod 卡在 `ImagePullBackOff`，日志提示 `403 Forbidden` 或 `ntoomanyrequests`（公共加速器限流）。
+*   **原理**：K3s 底层用 containerd，不读 Docker 的镜像，且受公共网络影响大。
+*   **解决**：Docker 拉取 -> 导出 tar 包 -> 放入 `/var/lib/rancher/k3s/agent/images/` -> 重启 K3s 自动导入。
+*   **验证**：使用 `k3s crictl images`，不能使用 `docker images`。
+
+### 2. K8s 资源对象核心概念
+*   **Pod**：最小调度单位。
+*   **Deployment**：管理 Pod 副本数和自愈。
+*   **Service (NodePort)**：给 Pod 分配固定的访问入口。外部访问链路：`公网 IP:NodePort -> Service -> Pod IP:容器端口`。
+*   **YAML 注意点**：`imagePullPolicy: IfNotPresent` 让 K8s 优先使用本地镜像。
+
+### 3. K3s 在 2G 内存服务器上的生存调优（高分面试题）
+*   **现象**：`kubectl` 报 `TLS handshake timeout`，日志频繁 `Slow SQL` 和 `Housekeeping took longer than expected`。
+*   **根因**：2G 内存扛不住 K3s 全部组件 + 业务容器，发生 OOM 和磁盘 I/O 阻塞。
+*   **调优手段**：
+    1.  **配置 Swap**：`sysctl vm.swappiness=60`，让系统积极使用虚拟内存，防 OOM。
+    2.  **裁剪组件**：删除不需要的 `metrics-server`、`svclb-traefik`。
+    3.  **卸载 Docker**：镜像导入 K3s 后，停用 Docker，彻底省出内存。
+
+---
+
+## 💡 面试标准回答模板（STAR 法则）
+
+**Q：你在学习云计算过程中遇到过什么最难的问题，怎么解决的？**
+*   **Situation (情景)**：我在本地 K3s 集群部署应用时，所有系统组件卡在 `ImagePullBackOff`，Kubectl 也频繁报 TLS 超时。
+*   **Task (任务)**：需要让集群恢复健康，并成功部署自建镜像。
+*   **Action (行动)**：
+    1. 通过 `kubectl describe` 和 `journalctl` 定位到两个问题：公共镜像加速器被限流（403），以及 2G 内存耗尽导致 I/O 阻塞。
+    2. 针对镜像限流，采用 Docker 导出 tar 包，放入 K3s 指定目录的**离线导入法**绕过网络。
+    3. 针对内存瓶颈，调大 `swappiness` 启用 Swap，并裁剪了不必要的 `metrics-server` 组件，卸载了后台 Docker 释放内存。
+*   **Result (结果)**：集群恢复流畅，自建 Python 应用成功通过 NodePort 暴露，浏览器公网访问成功。这让我彻底理解了 K8s 的底层资源调度和容器的隔离机制。
