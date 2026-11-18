@@ -80,3 +80,31 @@
     3.  重启 K3s：`systemctl restart k3s`，K3s 会自动导入。
 *   **验证命令**：`k3s crictl images | grep klipper-lb`（注意：查看 K3s 镜像必须用 crictl，不能用 docker images）。
 *   **面试延伸**：生产环境中，为了防止外部镜像仓库挂掉或限流，通常会搭建私有镜像仓库（如 Harbor），并将镜像推送到私有仓库，K8s 从内网拉取。
+
+### K3s 高负载下的 TLS 超时与 Slow SQL 问题
+
+*   **现象**：`kubectl` 执行命令报 `TLS handshake timeout`；`journalctl -u k3s` 显示大量 `Slow SQL`、`connection refused` 到 kubelet 端口以及 `Housekeeping took longer than expected`。
+*   **根因**：2核2G 的云服务器资源（尤其是内存和磁盘 I/O）被 K3s 控制面组件、容器运行时及工作负载耗尽。K3s 官方建议单节点带负载至少需要 1.6GB 内存，当前环境已触及瓶颈，导致 kubelet 响应缓慢、SQLite 写入阻塞。
+*   **解决**：
+    1.  临时缓解：重启 K3s 释放内存；删除非必要的 `svclb-traefik`、`metrics-server` 等组件。
+    2.  长期方案：为 K3s 瘦身（安装时 `--disable traefik --disable servicelb`），或升级服务器内存至 4GB。
+*   **面试延伸**：K8s 对资源（内存、I/O）非常敏感。在资源不足时，控制面组件的响应会变慢，表现为 API 超时、Pod 调度延迟等。排查此类问题应先看系统资源（`free -h`、`iostat`），而非盲目调整 K8s 配置。
+
+
+## 九、 K3s 资源瓶颈调优与终极部署
+
+### 1. 2G 内存跑 K8s 的生存指南
+*   **现象**：执行 kubectl 报 `TLS handshake timeout`，系统日志疯狂刷 `Slow SQL` 和 `connection refused`。
+*   **根因**：K3s 组件（kubelet, apiserver 等）占用大量物理内存，1.7G 内存耗尽时触发系统 I/O 阻塞，导致 API Server 响应超时。
+*   **调优手段**：
+    1.  **启用 Swap**：通过 `sysctl vm.swappiness=60` 让系统在物理内存不足时积极使用 Swap 虚拟内存，避免 OOM Killer 强杀进程。
+    2.  **裁剪组件**：删除单节点不需要的 `metrics-server`、`svclb-traefik` 等资源消耗大户。
+    3.  **卸载 Docker**：镜像导入 K3s 后，停止 Docker 服务，彻底释放内存。
+
+### 2. K8s 核心对象实战总结
+*   **Deployment**：负责管理 Pod 的生命周期和副本数。我们通过 YAML 告诉 K8s 跑一个副本，它会自动实现故障自愈。
+*   **Service (NodePort)**：给 Pod 提供统一的访问入口。NodePort 会在宿主机的 30000-32767 范围内随机分配一个端口（如 31234），外部通过 `公网IP:31234` 即可访问应用。
+*   **访问链路**：`浏览器 -> 公网 IP:NodePort -> K8s Service -> Pod (容器内 5000 端口)`。
+
+### 3. 云原生部署完整闭环
+`本地写代码 -> Docker 打包镜像 -> 导出 tar 离线喂给 K3s -> 编写 YAML 部署 -> Service 暴露端口 -> 公网访问成功`
