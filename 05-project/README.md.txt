@@ -69,3 +69,14 @@
 *   删除容器：`docker rm my-web-app`
 *   查看本地镜像：`docker images`
 *   删除镜像：`docker rmi my-python-app:v1`
+
+### 解决 K3s 镜像拉取 403 Forbidden (限流) 问题
+
+*   **现象**：`svclb-traefik` 一直处于 `ImagePullBackOff`，`describe` 发现报错 `403 Forbidden`，提示 `ntoomanyrequests: 免费节点当前繁忙`。
+*   **原因**：K3s 的 containerd 通过公共免费镜像加速节点拉取镜像时，触发限流。
+*   **解决方案（离线导入法）**：
+    1.  利用 Docker（配置了独立加速）拉取镜像：`docker pull rancher/klipper-lb:v0.4.17`
+    2.  导出为 tar 包并放入 K3s 的自动导入目录：`docker save ... -o /var/lib/rancher/k3s/agent/images/klipper-lb.tar`
+    3.  重启 K3s：`systemctl restart k3s`，K3s 会自动导入。
+*   **验证命令**：`k3s crictl images | grep klipper-lb`（注意：查看 K3s 镜像必须用 crictl，不能用 docker images）。
+*   **面试延伸**：生产环境中，为了防止外部镜像仓库挂掉或限流，通常会搭建私有镜像仓库（如 Harbor），并将镜像推送到私有仓库，K8s 从内网拉取。
