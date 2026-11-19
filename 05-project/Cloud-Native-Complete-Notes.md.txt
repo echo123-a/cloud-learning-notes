@@ -1,0 +1,150 @@
+# 云计算与云原生全链路实战笔记
+
+> **学习路线**：Linux 基础 -> 网络排障 -> Docker 容器化 -> K3s 集群部署 -> Ingress 网关配置
+> **实战目标**：在低配阿里云 ECS (2核2G) 上，从零部署 Python 全栈项目，并解决生产级故障。
+
+---
+
+## 目录
+1. 阶段一：本地环境与网络基础
+2. 阶段二：Linux 服务与故障排查
+3. 阶段三：Docker 容器化部署
+4. 阶段四：K3s 集群部署与资源调优
+5. 阶段五：K8s Ingress 前后端分离架构实战
+6. 附录：全链路排障手册（Troubleshooting Manual）
+
+---
+
+## 1. 阶段一：本地环境与网络基础
+
+### 1.1 Git 与 GitHub 配置
+*   **本地 Git 配置**：配置 `user.name` 和 `user.email`，解决 `Author identity unknown` 报错。
+*   **SSL 证书报错**：开启 Watt Toolkit 加速后，`git clone` 报 `SSL certificate problem`。解决：`git config --global http.sslbackend schannel`（让 Git 信任 Windows 系统证书库）。
+*   **凭据认证**：`git push` 弹出 GitHub 授权窗口，选择 `Sign in with your browser`。
+*   **中文乱码补丁**：`git config --global core.quotepath false`。
+
+### 1.2 云服务器 (ECS) 网络基础
+*   **出网不通**：购买实例时未分配公网带宽（峰值为 0）。解决：控制台修改带宽为按流量计费，峰值 5Mbps。
+*   **入网不通**：云厂商的“安全组”拦截。解决：在安全组入方向手动放行特定 TCP 端口（如 80、5000、8080），授权对象 `0.0.0.0/0`。
+*   **抓包实战**：使用 `tcpdump -i any -nn port 80 -S` 抓取 HTTP 请求。
+    *   `[S]`：SYN 包（请求连接）
+    *   `[S.]`：SYN+ACK（同意连接）
+    *   `[.]`：ACK（确认收到）
+    *   `[F.]`：FIN（断开连接）
+*   **面试题：为什么是三次握手？** 为了确认双方的发送和接收能力都正常，防止历史失效的 SYN 包突然到达服务端导致资源浪费。
+
+---
+
+## 2. 阶段二：Linux 服务与故障排查
+
+### 2.1 服务管理 (systemctl)
+*   查看服务状态：`systemctl status nginx`（关注 `Active: active (running)` 或 `inactive (dead)`）。
+*   启动/停止/重启/开机自启：`systemctl start/stop/restart/enable nginx`。
+
+### 2.2 故障排查三层逻辑（面试必考：网站挂了怎么查？）
+1.  **查服务状态**：`systemctl status 服务名`（看进程是否存活）。
+2.  **查端口监听**：`ss -tlnp | grep 端口号`（看服务是否真正绑定了端口）。
+3.  **查错误日志**：`tail -n 20 /var/log/...`（看具体报错原因）。
+
+### 2.3 磁盘满了排查
+*   `df -h`：看整体磁盘使用率。
+*   `du -sh /*`：看根目录下哪个文件夹最占空间。
+*   `du -sh /var/log/*`：深入查日志文件（清理日志用 `> 文件名` 清空，慎用 `rm` 防句柄丢失）。
+
+---
+
+## 3. 阶段三：Docker 容器化部署
+
+### 3.1 Docker 基础与安装
+*   **国内安装避坑**：使用官方脚本 `get.docker.com` 容易超时，改用阿里云软件源安装。
+*   **镜像加速**：修改 `/etc/docker/daemon.json`，配置公共加速器（如 `docker.1ms.run`），重启 Docker 生效。
+
+### 3.2 Dockerfile 编写规范与分层缓存
+*   **标准结构**：`FROM` -> `WORKDIR` -> `COPY requirements` -> `RUN pip install` -> `COPY . .` -> `EXPOSE` -> `CMD`。
+*   **分层缓存机制（面试高频）**：先拷贝 `requirements.txt` 并执行安装，再拷贝全量代码。这样只要依赖不变，修改代码重建镜像时会命中缓存，大幅提升构建速度。
+*   **端口声明**：`EXPOSE` 仅是声明，真正开放端口靠 `docker run -p 宿主机端口:容器端口`。
+*   **0.0.0.0 绑定**：容器内应用必须绑定 `host='0.0.0.0'`，否则外部流量无法进入容器。
+
+### 3.3 传统部署 vs 容器化部署
+*   **传统 systemd**：环境依赖容易冲突，无法做到“一次构建，到处运行”。
+*   **容器化部署**：打包代码和运行环境，进程隔离，是云原生绝对主流。
+
+---
+
+## 4. 阶段四：K3s 集群部署与资源调优
+
+### 4.1 解决 K3s 镜像拉取 403 Forbidden
+*   **现象**：`kubectl get pods -A` 发现组件卡在 `ImagePullBackOff`，日志提示 `ntoomanyrequests`。
+*   **根因**：K3s 底层使用 containerd，不读 Docker 的镜像加速配置，且公共免费加速器被限流。
+*   **解决（离线导入法）**：
+    1. 用 Docker 拉取镜像（借助 Docker 配好的加速）。
+    2. 导出到 K3s 的自动导入目录：`docker save <image> -o /var/lib/rancher/k3s/agent/images/xxx.tar`
+    3. 重启 K3s 触发自动导入：`systemctl restart k3s`。
+    4. 验证：`k3s crictl images`（不能用 docker images 查）。
+
+### 4.2 2核2G 服务器跑 K8s 的资源调优（高分面试题）
+*   **现象**：`kubectl` 报 `TLS handshake timeout`，系统日志频繁报 `Slow SQL` 和 `Housekeeping took longer than expected`。
+*   **根因**：2G 物理内存耗尽，触发 Linux OOM Killer，导致 kubelet 被卡死；Swap 未启用。
+*   **调优手段**：
+    1. **配置 Swap**：`sysctl vm.swappiness=60`，让系统积极使用虚拟内存，防 OOM。
+    2. **裁剪组件**：删除不需要的 `metrics-server` 和 `svclb-traefik`。
+    3. **卸载 Docker**：镜像导入 K3s 后，停止 Docker 服务 (`systemctl stop docker`)，彻底释放内存。
+
+### 4.3 K8s 核心对象
+*   **Pod**：K8s 最小调度单位，包含一个或多个容器。
+*   **Deployment**：管理 Pod 副本数，实现故障自愈（Pod 挂了自动拉起）。
+*   **Service**：给 Pod 提供固定访问入口。
+    *   `ClusterIP`：仅集群内部访问。
+    *   `NodePort`：在宿主机开放一个随机高位端口（30000-32767），外部通过 `IP:NodePort` 访问。
+*   **YAML 关键配置**：`imagePullPolicy: IfNotPresent` 让 K8s 优先使用本地镜像。
+
+---
+
+## 5. 阶段五：K8s Ingress 前后端分离架构实战
+
+### 5.1 项目架构说明
+本项目模拟企业级云原生部署架构，将前端（静态页面）与后端（Python Flask API）分离部署，统一通过 K3s 的 Ingress (Traefik) 网关对外暴露服务。
+
+**流量访问链路：**
+`用户浏览器 (公网 80 端口) -> 阿里云安全组 -> 宿主机 svclb-traefik (iptables 转发) -> Traefik Ingress 路由 -> 对应的 K8s Service (ClusterIP) -> 后端 Pod (容器端口)`
+
+### 5.2 核心技术点
+*   **ConfigMap 挂载**：将 HTML 代码挂载到 Nginx 容器中，实现代码与镜像解耦，修改页面无需重建镜像。
+*   **路径路由**：访问 `/` 转发给前端 Service，访问 `/api` 转发给后端 Service。
+*   **字符编码**：在 HTML 的 `<head>` 中加入 `<meta charset="UTF-8">` 防乱码。
+
+### 5.3 面试高频 Q&A
+*   **Q：为什么要用 Ingress 而不是直接暴露 NodePort？**
+    A：NodePort 会占用宿主机大量高位端口，且不支持基于域名或路径的路由。Ingress 作为七层网关，可以通过一个 80/443 端口统一接管流量，实现灵活的路径路由、SSL 卸载和灰度发布。
+*   **Q：ConfigMap 挂载静态文件的好处是什么？**
+    A：实现了配置与镜像的解耦。修改前端页面只需修改 ConfigMap 并重启 Pod，无需重新构建和推送 Docker 镜像，极大提升了开发和运维效率。
+
+---
+
+## 6. 附录：全链路排障手册（Troubleshooting Manual）
+
+### 6.1 浏览器访问公网 IP 出现 ERR_CONNECTION_TIMED_OUT
+*   **排查路径**：
+    1. 检查阿里云安全组：确认入方向已放行 TCP 80 端口。
+    2. 检查本地回环：在服务器执行 `curl -I http://127.0.0.1`，返回 `200 OK` 且带有 `Server: nginx/1.31.9` 标识。
+*   **根因定位**：宿主机上遗留了之前测试用的**原生 Nginx 进程/容器**，抢占了 80 端口。导致 K3s 的 `svclb-traefik` 无法接管流量，公网请求到达网卡后被原生 Nginx 拦截，造成超时。
+*   **解决方案**：`systemctl stop nginx` 停掉原生 Nginx，`systemctl disable nginx` 禁止自启。重启 K3s (`systemctl restart k3s`)，让 Traefik 重新接管宿主机 80 端口。
+
+### 6.2 Traefik Ingress 控制器失踪
+*   **现象**：`svclb-traefik` 在运行，但 `traefik` 的 Pod 不见了，Ingress 路由不生效。
+*   **根因**：之前为了省内存手动删除了 Traefik 的 Deployment，导致 Helm 状态异常。
+*   **解决**：删除 HelmChart 记录 (`kubectl delete helmcharts -n kube-system traefik`)，重启 K3s 让其自动重建控制器。
+
+### 6.3 Docker 构建镜像报错找不到包版本
+*   **报错现象**：`ERROR: Could not find a version that satisfies the requirement flask==2.3.3 (from versions: none)`
+*   **根因**：Dockerfile 中指定了清华 PyPI 镜像源，但该源存在同步延迟，尚未收录该特定版本。
+*   **解决**：将 Dockerfile 中的 pip 源更换为阿里云源 `https://mirrors.aliyun.com/pypi/simple/`。
+
+### 6.4 网页前端中文显示乱码
+*   **报错现象**：网页能打开，但中文变成“鎴戞槸鍓嶇鏂囦欢”等乱码。
+*   **根因**：浏览器无法推断 HTML 的字符集编码，用错误编码（如 GBK）解析了 UTF-8 内容。
+*   **解决**：在 HTML 文件的 `<head>` 中加入 `<meta charset="UTF-8">`。
+
+### 6.5 K3s 系统组件卡在 ImagePullBackOff (403 Forbidden)
+*   **现象**：执行 `kubectl get pods -A`，全卡在拉取镜像阶段，日志提示 `ntoomanyrequests: 免费节点当前繁忙`。
+*   **解决（离线导入法）**：Docker 拉取镜像 -> 导出 tar 包 -> 放入 `/var/lib/rancher/k3s/agent/images/` -> 重启 K3s 自动导入。
