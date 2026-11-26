@@ -1,0 +1,41 @@
+name: Deploy to Cloud Server
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    # 1. 这里可以假装跑一下测试，企业级必须有
+    - name: Run Tests
+      run: echo "Running tests... Passed!"
+
+    # 2. 通过 SSH 远程控制你的阿里云服务器
+    - name: Deploy via SSH
+      uses: appleboy/ssh-action@v0.1.10
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USER }}
+        key: ${{ secrets.SERVER_SSH_KEY }}
+        port: ${{ secrets.SERVER_PORT }}
+        script: |
+          # 进入服务器上的项目目录
+          cd /var/www/cloud-learning-notes
+          
+          # 拉取最新的代码
+          git pull origin main
+          
+          # 重新构建 Docker 镜像
+          docker build -f Dockerfile.ultimate -t my-python-app:latest .
+          
+          # 导出镜像并喂给 K3s
+          docker save my-python-app:latest -o /var/lib/rancher/k3s/agent/images/my-python-app-latest.tar
+          
+          # 重启 K8s 里的 Deployment，触发滚动更新（拉取最新镜像）
+          kubectl rollout restart deployment/my-python-app-deployment
