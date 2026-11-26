@@ -7,7 +7,7 @@ app = Flask(__name__)
 def hello():
     # 获取当前服务器的真实主机名（在云服务器上运行会显示实例 ID）
     hostname = socket.gethostname()
-    return f"<h1>Hello, Cloud Engineer!</h1><p>我是被部署在云服务器上的 Python 应用。</p><p>当前主机名: {hostname}</p>"
+    return f"<h1>Hello, CI/CD!</h1><p>我是被自动化流水线部署的，当前主机名: {hostname}</p>"
 
 if __name__ == '__main__':
     # 监听 0.0.0.0 非常重要，代表允许所有外部 IP 访问
